@@ -1214,6 +1214,7 @@ export class DurableAgentHost implements AgentProtocol {
   private configuration(plan: TurnPlan): RuntimeConversationSeed['configuration'] {
     return {
       kind: plan.imageGeneration ? 'image' : 'language',
+      mode: plan.agent.mode,
       model: plan.agent.model,
       options: plan.agent.options,
       tools: plan.imageGeneration
@@ -3232,6 +3233,7 @@ function replyTargets(input: AgentSubmitMessageInput | AgentStartSessionInput) {
 function configurationKey(configuration: RuntimeConversationSeed['configuration']) {
   const facts = {
     kind: configuration.kind ?? 'language',
+    mode: configuration.mode ?? 'standard',
     model: configuration.model,
     instructions: configuration.instructions,
     initialInstructions: configuration.initialInstructions ?? [],

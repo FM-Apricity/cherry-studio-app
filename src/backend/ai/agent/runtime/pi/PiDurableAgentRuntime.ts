@@ -182,6 +182,13 @@ export class PiDurableAgentRuntime implements DurableAgentRuntime {
       (providerId, signal) =>
         Promise.resolve(this.requirePorts().traceModel?.(this.executionOwner(providerId, signal))),
       (signal) => (signal ? this.webRequests.get(signal) : undefined),
+      (providerId, signal) => {
+        const owner = this.executionOwner(providerId, signal);
+        const configuration = this.configurations.get(laneKey(owner));
+        return configuration?.mode === 'minimal' && owner.turnId
+          ? { sessionId: owner.sessionId, turnId: owner.turnId }
+          : undefined;
+      },
     );
   }
 
@@ -422,6 +429,7 @@ export class PiDurableAgentRuntime implements DurableAgentRuntime {
       PiConfigurationSchema.parse(await this.requireRuntime().configuration(key));
     return {
       kind: stored.kind,
+      mode: stored.mode,
       model: { ...stored.model },
       instructions: stored.instructions,
       initialInstructions: stored.initialInstructions,

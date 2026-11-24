@@ -1,5 +1,6 @@
 import type { AgentReplyPartEdit } from '@/shared/contracts/agent';
 import { MAX_PARALLEL_ANSWERS } from '@/shared/contracts/agent/inputs';
+import type { AgentMode } from '@/shared/data/types/agent';
 
 import type { TraceSpan } from '../../observability';
 import type {
@@ -126,6 +127,8 @@ export type RuntimeExecutionPorts = {
 };
 
 export type RuntimeConversationConfiguration = {
+  /** Absent on legacy configurations; never infer pure chat from an empty tool list. */
+  mode?: AgentMode;
   /** Direct image requests execute as a single unsafe capability, without a language-model request. */
   kind?: 'language' | 'image';
   model: RuntimeModel;

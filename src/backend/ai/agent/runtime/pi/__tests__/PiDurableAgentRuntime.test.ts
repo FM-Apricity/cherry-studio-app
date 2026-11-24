@@ -1947,6 +1947,176 @@ describe('Persistent Agent facade', () => {
   });
 });
 
+describe('Pure-chat Responses relay contract', () => {
+  type SentRequest = { headers: Headers; body: Record<string, unknown> };
+
+  function relayFixture({
+    api = 'openai-responses',
+    baseUrl = 'https://relay.example.test/v1',
+    retry = false,
+  }: { api?: 'openai-responses' | 'openai-completions'; baseUrl?: string; retry?: boolean } = {}) {
+    const state = fixture();
+    const sent: SentRequest[] = [];
+    const resolveModel = state.dependencies.resolveModel;
+    state.dependencies.resolveModel = async (...args) => {
+      const resolved = await resolveModel(...args);
+      const model = { ...wire, api, baseUrl, reasoning: true };
+      const adapter = resolvePiApiAdapter(
+        api === 'openai-responses' ? api : 'openai-chat-completions',
+      );
+      // Use Jest's installed CommonJS adapter; Metro uses loadStreamSimple's import entry.
+      const streamFn = await bindPiStream(
+        {
+          ...adapter,
+          loadStreamSimple: async () =>
+            (api === 'openai-responses' ? streamResponses : streamCompletions) as PiStreamFn,
+        },
+        {
+          apiKey: 'test-key',
+          headers: retry
+            ? { 'Session-ID': 'wrong-session', 'X-Codex-Turn-Metadata': 'wrong-metadata' }
+            : {},
+          maxRetries: retry ? 1 : 0,
+          maxTokens: 4096,
+          fetch: async (_url, init) => {
+            sent.push({
+              headers: new Headers(init?.headers),
+              body: JSON.parse(String(init?.body)),
+            });
+            if (retry && sent.length === 1)
+              return new Response('{"error":{"message":"retry"}}', {
+                status: 503,
+                headers: { 'content-type': 'application/json', 'retry-after-ms': '1' },
+              });
+            if (api === 'openai-completions')
+              return new Response(
+                'data: {"id":"chat","choices":[{"index":0,"delta":{"role":"assistant","content":"Answer."},"finish_reason":null}]}\n\n' +
+                  'data: {"id":"chat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+                { headers: { 'content-type': 'text/event-stream' } },
+              );
+            const item = {
+              type: 'message',
+              id: 'msg',
+              role: 'assistant',
+              status: 'completed',
+              content: [{ type: 'output_text', text: 'Answer.', annotations: [] }],
+            };
+            const events = [
+              { type: 'response.output_item.added', output_index: 0, item },
+              { type: 'response.output_item.done', output_index: 0, item },
+              {
+                type: 'response.completed',
+                response: {
+                  id: 'response',
+                  status: 'completed',
+                  usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+                },
+              },
+            ];
+            return new Response(
+              events
+                .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+                .join(''),
+              {
+                headers: { 'content-type': 'text/event-stream' },
+              },
+            );
+          },
+        },
+      );
+      return { ...resolved, model, streamFn };
+    };
+    return { ...state, sent };
+  }
+
+  test('serializes stable conversation identity, retries one turn, and retains minimal mode after reopen', async () => {
+    const state = relayFixture({ retry: true });
+    let runtime = state.create();
+    const now = jest.spyOn(Date, 'now').mockReturnValue(new Date(2026, 11, 31, 23, 59).getTime());
+    try {
+      await runtime.initialize(state.database, state.ports);
+      await runtime.ensureConversation({
+        ...seed,
+        configuration: { ...seed.configuration, mode: 'minimal' },
+      });
+      await submitAndWait(runtime, input('first'));
+      expect(state.sent).toHaveLength(2);
+      expect(state.sent[1]!.body).toEqual(state.sent[0]!.body);
+      await runtime.close();
+      now.mockReturnValue(new Date(2027, 0, 1, 0, 1).getTime());
+      runtime = state.create();
+      await runtime.initialize(state.database, state.ports);
+      expect((await runtime.configuration(lane)).mode).toBe('minimal');
+      // Completed lanes are lazily reinstalled by the Host using their persisted configuration.
+      await runtime.configure(lane, await runtime.configuration(lane));
+      await submitAndWait(runtime, input('second'));
+      const other = runtimeLane('other-session');
+      await runtime.ensureConversation({
+        ...seed,
+        lane: other,
+        configuration: { ...seed.configuration, mode: 'minimal' },
+      });
+      await submitAndWait(runtime, input('third'), 'completed', other);
+      expect(state.sent).toHaveLength(4);
+      for (const [index, request] of state.sent.entries()) {
+        const sessionId = index === 3 ? 'other-session' : 'session';
+        const turnId = index < 2 ? 'turn-first' : index === 2 ? 'turn-second' : 'turn-third';
+        expect(request.headers.get('session-id')).toBe(sessionId);
+        expect(JSON.parse(request.headers.get('x-codex-turn-metadata')!)).toEqual({
+          session_id: sessionId,
+          thread_id: sessionId,
+          turn_id: turnId,
+          request_kind: 'turn',
+        });
+        expect(request.body.prompt_cache_key).toBe(sessionId);
+        expect(request.body.instructions).toEqual(expect.stringContaining('Help.'));
+        expect(request.body.input).toEqual(
+          expect.arrayContaining([expect.objectContaining({ role: 'user' })]),
+        );
+        expect(
+          (request.body.input as { role?: string }[]).some(
+            (item) => item.role === 'system' || item.role === 'developer',
+          ),
+        ).toBe(false);
+      }
+      expect(state.sent[0]!.headers.get('x-codex-turn-metadata')).toBe(
+        state.sent[1]!.headers.get('x-codex-turn-metadata'),
+      );
+      expect(state.sent[0]!.body.instructions).toEqual(expect.stringContaining('2026-12-31'));
+      expect(state.sent[2]!.body.instructions).toEqual(expect.stringContaining('2027-01-01'));
+    } finally {
+      await runtime.close();
+      now.mockRestore();
+    }
+  });
+
+  test.each([
+    { mode: 'standard' as const },
+    { mode: undefined },
+    { mode: 'minimal' as const, baseUrl: 'https://api.openai.com/v1' },
+    { mode: 'minimal' as const, api: 'openai-completions' as const },
+  ])('does not adapt requests outside the agreed scope: %j', async ({ mode, ...options }) => {
+    const state = relayFixture(options);
+    const runtime = state.create();
+    try {
+      await runtime.initialize(state.database, state.ports);
+      await runtime.ensureConversation({ ...seed, configuration: { ...seed.configuration, mode } });
+      await submitAndWait(runtime, input('isolated'));
+      expect(state.sent).toHaveLength(1);
+      const request = state.sent[0]!;
+      expect(request.headers.get('session-id')).toBeNull();
+      expect(request.headers.get('x-codex-turn-metadata')).toBeNull();
+      expect(request.body.prompt_cache_key).not.toBe('session');
+      expect(request.body.instructions).toBeUndefined();
+      expect(request.body.input ?? request.body.messages).toEqual(
+        expect.arrayContaining([expect.objectContaining({ role: 'developer' })]),
+      );
+    } finally {
+      await runtime.close();
+    }
+  });
+});
+
 describe('Native web tools', () => {
   const webTool = (name: string): RuntimeTool => ({
     ref: { source: 'builtin', capabilityId: name },

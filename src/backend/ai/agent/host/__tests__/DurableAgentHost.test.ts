@@ -3107,6 +3107,39 @@ describe('Cherry-owned transcript and disposable execution recovery', () => {
     }
   });
 
+  test.each(['standard', 'minimal'] as const)(
+    'passes explicit %s mode to the Runtime',
+    async (mode) => {
+      const state = fixture({
+        agents: {
+          getAgent: async (id) => ({
+            id,
+            name: 'Agent',
+            instructions: '',
+            mode,
+            model: { providerId: 'provider', modelId: 'model' },
+            options: {},
+            toolApprovalMode: 'default',
+          }),
+        },
+      });
+      const ensure = jest.spyOn(state.conversations, 'ensureConversation');
+      await state.host.initialize();
+      try {
+        await state.host.startSession({
+          sessionId: state.sessionId,
+          agentId: state.agentId,
+          userMessageId: uuid(),
+          assistantMessageId: uuid(),
+          parts: [{ type: 'text', text: 'Hello' }],
+        });
+        expect(ensure.mock.calls[0]![0].configuration.mode).toBe(mode);
+      } finally {
+        await state.host.close();
+      }
+    },
+  );
+
   test.each(['preferred', 'fallback', 'disabled'] as const)(
     'hands the frozen web policy to the Runtime with the conversation configuration (%s)',
     async (modelTools) => {

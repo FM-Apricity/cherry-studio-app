@@ -3,6 +3,11 @@ import { ENDPOINT_TYPE } from '@cherrystudio/provider-registry';
 import type { CacheRetention, FetchFunction, ProviderHeaders } from '@earendil-works/pi-ai';
 import { normalizeContext } from '@earendil-works/pi-ai/utils/transcript';
 
+import {
+  applyPiChatResponsesHeaders,
+  applyPiChatResponsesPayload,
+  resolvePiChatResponsesIdentity,
+} from './piChatResponses';
 import { piModelPayloadAttributes } from './piModelDiagnostics';
 import type { PiStreamFn } from './piModelTypes';
 import {
@@ -208,13 +213,15 @@ export async function bindPiStream(
   const streamSimple = await adapter.loadStreamSimple();
 
   return (model, context, options) => {
-    const { reportFetchFailure, trace, ...providerOptions } = options ?? {};
+    const { reportFetchFailure, trace, chatResponsesIdentity, ...providerOptions } = options ?? {};
     const fetch = adapter.supportsCustomFetch
       ? withRetryableBodyFailure(binding.fetch, reportFetchFailure)
       : undefined;
     const maxTokens = options?.maxTokens ?? binding.maxTokens;
     const temperature = options?.temperature ?? binding.temperature;
     const headers: ProviderHeaders = { ...options?.headers, ...binding.headers };
+    const chatIdentity = resolvePiChatResponsesIdentity(model, chatResponsesIdentity);
+    applyPiChatResponsesHeaders(headers, chatIdentity);
     if (binding.apiKey === '') {
       // SDKs require a key even for unauthenticated gateways. Suppress only generated auth.
       for (const name of adapter.authHeaderNames) {
@@ -252,11 +259,12 @@ export async function bindPiStream(
               temperature,
             )
           : resolvedPayload;
-        const requestPayload = applyPiRequestCompatibility(
+        let requestPayload = applyPiRequestCompatibility(
           parameterizedPayload,
           adapter.api,
           requestModel.id,
         );
+        requestPayload = applyPiChatResponsesPayload(requestPayload, chatIdentity);
         trace?.setAttributes(piModelPayloadAttributes(requestPayload, adapter.api));
         return requestPayload;
       },

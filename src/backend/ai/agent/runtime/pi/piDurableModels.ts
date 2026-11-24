@@ -18,6 +18,7 @@ import { readKnownAiFinishReason } from '@/shared/utils/aiFailure';
 
 import type { TraceSpan } from '../../../observability';
 import type { RuntimeModel, RuntimeOptions, RuntimeUsageReport } from '../types';
+import type { PiChatResponsesIdentity } from './piChatResponses';
 import { resolvePiCompactionPolicy } from './piCompaction';
 import { imageModelStream } from './piDurableImageModel';
 import { piDurableUsage, withPiContinuationUsage } from './piDurableProjection';
@@ -62,6 +63,10 @@ export function createPiDurableModels(
   ) => Promise<TraceSpan | undefined>,
   /** Routes of a conversation request that may still use the web; absent for every other call. */
   webRoutes?: (signal: AbortSignal | undefined) => PiWebToolRoutes | undefined,
+  chatIdentity?: (
+    providerSessionId: string | undefined,
+    signal: AbortSignal | undefined,
+  ) => PiChatResponsesIdentity | undefined,
 ) {
   const models = createModels({
     authContext: { env: async () => undefined, fileExists: async () => false },
@@ -192,6 +197,7 @@ export function createPiDurableModels(
             const stream = await resolved.streamFn(resolved.model, context, {
               ...options,
               trace,
+              chatResponsesIdentity: chatIdentity?.(options?.sessionId, options?.signal),
               onPayload: async (payload: unknown, wire: Model<Api>) => {
                 // A credential retry sends the request again; its metadata starts over.
                 if (!continuedContent) web?.reset();

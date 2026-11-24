@@ -389,6 +389,48 @@ describe('Pi API adapters', () => {
     });
   });
 
+  test('enforces pure-chat identity and instructions after caller payload hooks and request parameters', async () => {
+    const adapter = resolvePiApiAdapter(ENDPOINT_TYPE.OPENAI_RESPONSES);
+    jest.spyOn(adapter, 'loadStreamSimple').mockResolvedValue(mockOpenAiResponsesStreamSimple);
+    const stream = await bindPiStream(adapter, {
+      apiKey: 'key',
+      fetch: mockFetch,
+      headers: { 'SESSION-ID': 'provider-override' },
+      maxRetries: 0,
+      maxTokens: 4096,
+      requestParameters: {
+        model: {} as Model,
+        profile: selectFormatWire(REASONING_FORMAT_PROFILES['openai-responses'], 'effort'),
+        selection: 'none',
+      },
+    });
+    const model = {
+      api: 'openai-responses',
+      baseUrl: 'https://relay.test/v1',
+      id: 'model',
+    } as PiModel<SupportedPiApi>;
+    await stream(model, context, {
+      chatResponsesIdentity: { sessionId: 'business-session', turnId: 'business-turn' },
+      headers: { 'Session-ID': 'caller-override' },
+      onPayload: async () => ({
+        instructions: 'Existing',
+        prompt_cache_key: 'caller-override',
+        input: [
+          { role: 'developer', content: 'System' },
+          { role: 'user', content: 'Hello' },
+        ],
+      }),
+    });
+    const options = mockOpenAiResponsesStreamSimple.mock.calls.at(-1)![2];
+    expect(options).not.toHaveProperty('chatResponsesIdentity');
+    expect(new Headers(options.headers).get('session-id')).toBe('business-session');
+    expect(await options.onPayload({}, model)).toMatchObject({
+      instructions: 'Existing\n\nSystem',
+      prompt_cache_key: 'business-session',
+      input: [{ role: 'user', content: 'Hello' }],
+    });
+  });
+
   test('composes existing payload hooks and recomputes thinking budgets for each request cap', async () => {
     const { traces, records } = createTraceRecorder();
     const trace = traces.startTrace('pi.generate_content');

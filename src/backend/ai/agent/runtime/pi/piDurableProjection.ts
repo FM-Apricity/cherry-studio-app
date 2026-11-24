@@ -11,6 +11,7 @@ import { z } from 'zod';
 
 import { McpAppReferenceSchema } from '@/shared/contracts/mcpApp';
 import { McpModelContentSchema, McpResultSourceSchema } from '@/shared/contracts/mcpContent';
+import { AgentModeSchema } from '@/shared/data/types/agent';
 import { createTextPreview } from '@/shared/utils/textPreview';
 
 import {
@@ -73,6 +74,7 @@ export const PiConfigurationSchema = z
   .object({
     version: z.union([z.literal(1), z.literal(2)]),
     kind: z.enum(['language', 'image']).default('language'),
+    mode: AgentModeSchema.optional(),
     model: z.object({ providerId: z.string().min(1), modelId: z.string().min(1) }),
     instructions: z.string(),
     initialInstructions: z

@@ -16,6 +16,7 @@ import type {
   RuntimeOptions,
   RuntimeUsageContext,
 } from '../types';
+import type { PiChatResponsesIdentity } from './piChatResponses';
 import type { PiNativeWebTools } from './piWebTools';
 
 /** Provider transport shared by the durable engine and the temporary model probe. */
@@ -23,6 +24,8 @@ export type PiStreamFn = (
   model: Model<Api>,
   context: TranscriptContext,
   options?: SimpleStreamOptions & {
+    /** Business conversation/turn identity, supplied only for a pure-chat reply. */
+    chatResponsesIdentity?: PiChatResponsesIdentity;
     trace?: TraceSpan;
     reportFetchFailure?: (error: unknown) => void;
   },
