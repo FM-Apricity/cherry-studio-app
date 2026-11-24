@@ -20,7 +20,25 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     );
   }
 
-  const suffix = profile === 'development' ? '.dev' : profile === 'preview' ? '.preview' : '';
+  const sub2api = process.env.CHERRY_SUB2API_BUILD === 'true';
+  if (sub2api && profile !== 'preview') {
+    throw new Error('CHERRY_SUB2API_BUILD requires PROFILE=preview.');
+  }
+  const versionCode = process.env.SUB2API_ANDROID_VERSION_CODE;
+  if (
+    sub2api &&
+    versionCode &&
+    (!/^[1-9]\d*$/.test(versionCode) || Number(versionCode) > 2100000000)
+  ) {
+    throw new Error('SUB2API_ANDROID_VERSION_CODE must be an integer between 1 and 2100000000.');
+  }
+  const suffix = sub2api
+    ? '.sub2api'
+    : profile === 'development'
+      ? '.dev'
+      : profile === 'preview'
+        ? '.preview'
+        : '';
   const bundleIdentifier = `${config.ios!.bundleIdentifier}${suffix}`;
   const groupIdentifier = `group.${bundleIdentifier}`;
   const widgetBundleIdentifier = `${bundleIdentifier}.ExpoWidgetsTarget`;
@@ -39,8 +57,9 @@ export default ({ config }: ConfigContext): ExpoConfig => {
 
   return {
     ...config,
-    name:
-      profile === 'development'
+    name: sub2api
+      ? 'Cherry Studio sub2api'
+      : profile === 'development'
         ? `${config.name} Dev`
         : profile === 'preview'
           ? `${config.name} Preview`
@@ -49,7 +68,10 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     scheme: `cherrystudio${suffix.replace('.', '-')}`,
     updates: {
       ...config.updates,
-      enabled: profile !== 'development' && process.env.EXPO_PUBLIC_STORYBOOK_ENABLED !== 'true',
+      enabled:
+        !sub2api &&
+        profile !== 'development' &&
+        process.env.EXPO_PUBLIC_STORYBOOK_ENABLED !== 'true',
     },
     ios: {
       ...config.ios,
@@ -70,7 +92,11 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         ],
       },
     },
-    android: { ...config.android, package: `${config.android!.package}${suffix}` },
+    android: {
+      ...config.android,
+      package: `${config.android!.package}${suffix}`,
+      ...(sub2api && versionCode ? { versionCode: Number(versionCode) } : {}),
+    },
     plugins: [
       [
         './scripts/withAppUpdates.js',
@@ -78,6 +104,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           // Profile env is shared by build submission, native generation and OTA fingerprints.
           domesticStoresEnabled: domesticStoresSetting === 'true',
           apkUpdatesEnabled:
+            !sub2api &&
             profile !== 'preview' &&
             apkUpdatesSetting === 'true' &&
             !['production-google-play', 'production-domestic-stores'].includes(
