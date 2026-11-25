@@ -136,6 +136,7 @@ export class PiDurableAgentRuntime implements DurableAgentRuntime {
     Promise<readonly { lane: RuntimeLane; revision: number }[]>
   >();
   private readonly requestOwners = new WeakMap<AbortSignal, RuntimeExecutionIdentity>();
+  private readonly sessionRequestTurns = new WeakMap<AbortSignal, string>();
   /** Conversation requests that may use a native web tool: no failed lookup in the turn. */
   private readonly webRequests = new WeakMap<AbortSignal, PiWebToolRoutes>();
   private readonly observers = new Set<PiDurableObserver>();
@@ -184,10 +185,14 @@ export class PiDurableAgentRuntime implements DurableAgentRuntime {
       (signal) => (signal ? this.webRequests.get(signal) : undefined),
       (providerId, signal) => {
         const owner = this.executionOwner(providerId, signal);
-        const configuration = this.configurations.get(laneKey(owner));
-        return configuration?.mode === 'minimal' && owner.turnId
-          ? { sessionId: owner.sessionId, turnId: owner.turnId }
-          : undefined;
+        // Every mode shares the business session and owning turn, including tool continuations.
+        // Session-only work (compaction) gets a request-local ID, never a future user's turn.
+        let turnId = owner.turnId;
+        if (!turnId && signal) {
+          turnId = this.sessionRequestTurns.get(signal) ?? globalThis.crypto.randomUUID();
+          this.sessionRequestTurns.set(signal, turnId);
+        }
+        return turnId ? { sessionId: owner.sessionId, turnId } : undefined;
       },
     );
   }

@@ -43,6 +43,7 @@ import { bindPiStream, resolvePiApiAdapter } from '../piApiAdapters';
 import { PiDurableAgentRuntime } from '../PiDurableAgentRuntime';
 import { piSubmissionMetadata, piToolBlueprint } from '../piDurableProjection';
 import { PiDurableRuntime } from '../PiDurableRuntime';
+import { PiModelProbeRuntime } from '../PiModelProbeRuntime';
 import type { PiRuntimeDependencies, PiStreamFn } from '../piModelTypes';
 import { emptyAssistantMessage, providerErrorEvent } from '../piStreamEvents';
 import { withPiStreamIdleTimeout } from '../piStreamIdleTimeout';
@@ -1947,14 +1948,20 @@ describe('Persistent Agent facade', () => {
   });
 });
 
-describe('Pure-chat Responses relay contract', () => {
+describe('Responses relay contract', () => {
   type SentRequest = { headers: Headers; body: Record<string, unknown> };
 
   function relayFixture({
     api = 'openai-responses',
     baseUrl = 'https://relay.example.test/v1',
     retry = false,
-  }: { api?: 'openai-responses' | 'openai-completions'; baseUrl?: string; retry?: boolean } = {}) {
+    toolCycle = false,
+  }: {
+    api?: 'openai-responses' | 'openai-completions';
+    baseUrl?: string;
+    retry?: boolean;
+    toolCycle?: boolean;
+  } = {}) {
     const state = fixture();
     const sent: SentRequest[] = [];
     const resolveModel = state.dependencies.resolveModel;
@@ -1994,13 +2001,27 @@ describe('Pure-chat Responses relay contract', () => {
                   'data: {"id":"chat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
                 { headers: { 'content-type': 'text/event-stream' } },
               );
-            const item = {
-              type: 'message',
-              id: 'msg',
-              role: 'assistant',
-              status: 'completed',
-              content: [{ type: 'output_text', text: 'Answer.', annotations: [] }],
-            };
+            const needsTool =
+              toolCycle &&
+              !(sent.at(-1)!.body.input as { type?: string }[]).some(
+                (item) => item.type === 'function_call_output',
+              );
+            const item = needsTool
+              ? {
+                  type: 'function_call',
+                  id: 'fc_1',
+                  call_id: 'call_read',
+                  name: 'read_file',
+                  arguments: '{}',
+                  status: 'completed',
+                }
+              : {
+                  type: 'message',
+                  id: 'msg',
+                  role: 'assistant',
+                  status: 'completed',
+                  content: [{ type: 'output_text', text: 'Answer.', annotations: [] }],
+                };
             const events = [
               { type: 'response.output_item.added', output_index: 0, item },
               { type: 'response.output_item.done', output_index: 0, item },
@@ -2029,70 +2050,190 @@ describe('Pure-chat Responses relay contract', () => {
     return { ...state, sent };
   }
 
-  test('serializes stable conversation identity, retries one turn, and retains minimal mode after reopen', async () => {
-    const state = relayFixture({ retry: true });
-    let runtime = state.create();
-    const now = jest.spyOn(Date, 'now').mockReturnValue(new Date(2026, 11, 31, 23, 59).getTime());
+  test.each(['minimal', 'standard', undefined] as const)(
+    'serializes stable identity and retries across reopen in mode %s',
+    async (mode) => {
+      const state = relayFixture({ retry: true });
+      let runtime = state.create();
+      const now = jest.spyOn(Date, 'now').mockReturnValue(new Date(2026, 11, 31, 23, 59).getTime());
+      try {
+        await runtime.initialize(state.database, state.ports);
+        await runtime.ensureConversation({
+          ...seed,
+          configuration: { ...seed.configuration, mode },
+        });
+        await submitAndWait(runtime, input('first'));
+        expect(state.sent).toHaveLength(2);
+        expect(state.sent[1]!.body).toEqual(state.sent[0]!.body);
+        await runtime.close();
+        now.mockReturnValue(new Date(2027, 0, 1, 0, 1).getTime());
+        runtime = state.create();
+        await runtime.initialize(state.database, state.ports);
+        expect((await runtime.configuration(lane)).mode).toBe(mode);
+        // Completed lanes are lazily reinstalled by the Host using their persisted configuration.
+        await runtime.configure(lane, await runtime.configuration(lane));
+        await submitAndWait(runtime, input('second'));
+        const other = runtimeLane('other-session');
+        await runtime.ensureConversation({
+          ...seed,
+          lane: other,
+          configuration: { ...seed.configuration, mode },
+        });
+        await submitAndWait(runtime, input('third'), 'completed', other);
+        expect(state.sent).toHaveLength(4);
+        for (const [index, request] of state.sent.entries()) {
+          const sessionId = index === 3 ? 'other-session' : 'session';
+          const turnId = index < 2 ? 'turn-first' : index === 2 ? 'turn-second' : 'turn-third';
+          expect(request.headers.get('session-id')).toBe(sessionId);
+          expect(JSON.parse(request.headers.get('x-codex-turn-metadata')!)).toEqual({
+            session_id: sessionId,
+            thread_id: sessionId,
+            turn_id: turnId,
+            request_kind: 'turn',
+          });
+          expect(request.body.prompt_cache_key).toBe(sessionId);
+          expect(request.body.instructions).toEqual(expect.stringContaining('Help.'));
+          expect(request.body.input).toEqual(
+            expect.arrayContaining([expect.objectContaining({ role: 'user' })]),
+          );
+          expect(
+            (request.body.input as { role?: string }[]).some(
+              (item) => item.role === 'system' || item.role === 'developer',
+            ),
+          ).toBe(false);
+        }
+        expect(state.sent[0]!.headers.get('x-codex-turn-metadata')).toBe(
+          state.sent[1]!.headers.get('x-codex-turn-metadata'),
+        );
+        expect(state.sent[0]!.body.instructions).toEqual(expect.stringContaining('2026-12-31'));
+        expect(state.sent[2]!.body.instructions).toEqual(expect.stringContaining('2027-01-01'));
+      } finally {
+        await runtime.close();
+        now.mockRestore();
+      }
+    },
+  );
+
+  test.each(['minimal', 'standard', undefined] as const)(
+    'preserves tools and identity through a tool round in mode %s',
+    async (mode) => {
+      const state = relayFixture({ toolCycle: true });
+      const runtime = state.create();
+      const execute = jest.fn(async () => ({ value: 'File contents.', artifacts: [] }));
+      const tool: RuntimeTool = {
+        ref: { source: 'builtin', capabilityId: 'read_file' },
+        providerName: 'read_file',
+        displayName: 'Read file',
+        description: 'Read a file.',
+        inputSchema: { type: 'object', properties: {} },
+        approval: 'auto',
+        execute,
+      };
+      state.ports.resolveTool = async () => tool;
+      try {
+        await runtime.initialize(state.database, state.ports);
+        await runtime.ensureConversation({
+          ...seed,
+          configuration: { ...seed.configuration, mode, tools: [tool] },
+        });
+        await submitAndWait(runtime, input('tool-round'));
+        expect(execute).toHaveBeenCalledTimes(1);
+        expect(state.sent).toHaveLength(2);
+        for (const request of state.sent) {
+          expect(request.headers.get('session-id')).toBe('session');
+          expect(JSON.parse(request.headers.get('x-codex-turn-metadata')!)).toEqual({
+            session_id: 'session',
+            thread_id: 'session',
+            turn_id: 'turn-tool-round',
+            request_kind: 'turn',
+          });
+          expect(request.body.prompt_cache_key).toBe('session');
+          expect(request.body.instructions).toEqual(expect.stringContaining('Help.'));
+          expect(request.body.tools).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ type: 'function', name: 'read_file' }),
+            ]),
+          );
+          expect(
+            (request.body.input as { role?: string }[]).some(
+              (item) => item.role === 'system' || item.role === 'developer',
+            ),
+          ).toBe(false);
+        }
+        expect(state.sent[1]!.body.input).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ type: 'function_call', call_id: 'call_read' }),
+            expect.objectContaining({ type: 'function_call_output', call_id: 'call_read' }),
+          ]),
+        );
+      } finally {
+        await runtime.close();
+      }
+    },
+  );
+
+  test('adapts session-only compaction without borrowing the last user turn', async () => {
+    const state = relayFixture();
+    const runtime = state.create();
     try {
       await runtime.initialize(state.database, state.ports);
-      await runtime.ensureConversation({
-        ...seed,
-        configuration: { ...seed.configuration, mode: 'minimal' },
+      await runtime.ensureConversation(seed);
+      await submitAndWait(runtime, input('earlier'));
+      await submitAndWait(runtime, {
+        ...input('latest'),
+        input: [{ type: 'text', text: 'recent material '.repeat(2_000) }],
       });
-      await submitAndWait(runtime, input('first'));
-      expect(state.sent).toHaveLength(2);
-      expect(state.sent[1]!.body).toEqual(state.sent[0]!.body);
-      await runtime.close();
-      now.mockReturnValue(new Date(2027, 0, 1, 0, 1).getTime());
-      runtime = state.create();
-      await runtime.initialize(state.database, state.ports);
-      expect((await runtime.configuration(lane)).mode).toBe('minimal');
-      // Completed lanes are lazily reinstalled by the Host using their persisted configuration.
-      await runtime.configure(lane, await runtime.configuration(lane));
-      await submitAndWait(runtime, input('second'));
-      const other = runtimeLane('other-session');
-      await runtime.ensureConversation({
-        ...seed,
-        lane: other,
-        configuration: { ...seed.configuration, mode: 'minimal' },
-      });
-      await submitAndWait(runtime, input('third'), 'completed', other);
-      expect(state.sent).toHaveLength(4);
-      for (const [index, request] of state.sent.entries()) {
-        const sessionId = index === 3 ? 'other-session' : 'session';
-        const turnId = index < 2 ? 'turn-first' : index === 2 ? 'turn-second' : 'turn-third';
-        expect(request.headers.get('session-id')).toBe(sessionId);
-        expect(JSON.parse(request.headers.get('x-codex-turn-metadata')!)).toEqual({
-          session_id: sessionId,
-          thread_id: sessionId,
-          turn_id: turnId,
-          request_kind: 'turn',
-        });
-        expect(request.body.prompt_cache_key).toBe(sessionId);
-        expect(request.body.instructions).toEqual(expect.stringContaining('Help.'));
-        expect(request.body.input).toEqual(
-          expect.arrayContaining([expect.objectContaining({ role: 'user' })]),
-        );
-        expect(
-          (request.body.input as { role?: string }[]).some(
-            (item) => item.role === 'system' || item.role === 'developer',
-          ),
-        ).toBe(false);
-      }
-      expect(state.sent[0]!.headers.get('x-codex-turn-metadata')).toBe(
-        state.sent[1]!.headers.get('x-codex-turn-metadata'),
-      );
-      expect(state.sent[0]!.body.instructions).toEqual(expect.stringContaining('2026-12-31'));
-      expect(state.sent[2]!.body.instructions).toEqual(expect.stringContaining('2027-01-01'));
+      expect(await runtime.compactContext(lane, new AbortController().signal)).toBe('compacted');
+      expect(state.sent).toHaveLength(3);
+      const request = state.sent[2]!;
+      expect(request.headers.get('session-id')).toBe('session');
+      expect(request.body.prompt_cache_key).toBe('session');
+      const metadata = JSON.parse(request.headers.get('x-codex-turn-metadata')!);
+      expect(metadata.turn_id).toEqual(expect.any(String));
+      expect(metadata.turn_id).not.toBe('turn-latest');
+      expect(request.body.instructions).toEqual(expect.any(String));
+      expect(
+        (request.body.input as { role?: string }[]).some(
+          (item) => item.role === 'system' || item.role === 'developer',
+        ),
+      ).toBe(false);
     } finally {
       await runtime.close();
-      now.mockRestore();
+    }
+  });
+
+  test('adapts isolated Responses requests using their own session and turn', async () => {
+    const state = relayFixture();
+    const session = await new PiModelProbeRuntime(state.dependencies).open();
+    try {
+      const events = [];
+      for await (const event of session.execute({
+        sessionId: 'probe-session',
+        turnId: 'probe-turn',
+        model: reference,
+        instructions: 'Probe instructions.',
+        input: [{ type: 'text', text: 'Hello.' }],
+        history: [],
+        contextCheckpoint: null,
+        options: {},
+        tools: [],
+      }))
+        events.push(event);
+      expect(events).toEqual(
+        expect.arrayContaining([expect.objectContaining({ type: 'completed' })]),
+      );
+      expect(state.sent).toHaveLength(1);
+      const request = state.sent[0]!;
+      expect(request.headers.get('session-id')).toBe('probe-session');
+      expect(JSON.parse(request.headers.get('x-codex-turn-metadata')!).turn_id).toBe('probe-turn');
+      expect(request.body.prompt_cache_key).toBe('probe-session');
+      expect(request.body.instructions).toEqual(expect.stringContaining('Probe instructions.'));
+    } finally {
+      await session.close();
     }
   });
 
   test.each([
-    { mode: 'standard' as const },
-    { mode: undefined },
     { mode: 'minimal' as const, baseUrl: 'https://api.openai.com/v1' },
     { mode: 'minimal' as const, api: 'openai-completions' as const },
   ])('does not adapt requests outside the agreed scope: %j', async ({ mode, ...options }) => {

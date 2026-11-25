@@ -4,7 +4,7 @@
 
 ## 本 fork 修改了什么，为什么修改
 
-针对纯对话（`minimal` 模式）发往第三方中转站的 Responses 请求：
+针对所有会话模式发往第三方中转站的 Responses 请求，包括纯对话、Agent 以及可调用工具的对话：
 
 - **显式发送顶层 `instructions`**：将 Cherry 原本经 SDK 序列化到 `input` 中的文本 `system/developer` 消息移到顶层 `instructions`，并移除对应输入消息，避免重复。包括后续持久化的系统更新。这样做是为了避免 sub2api 在请求缺少 `instructions` 时补入自己的默认 instructions，保持实际发送的系统提示由客户端明确控制。已有的顶层文本 instructions 会保留；遇到无法安全转换的非文本系统内容时不丢弃原内容。
 - **`session-id` 请求头 = 当前 Cherry 会话 ID**。
@@ -15,23 +15,9 @@
 
 **边界与限制：**
 
-- 仅作用于明确标记为纯对话的 Responses 回复；Agent 模式、Chat Completions、Anthropic、Gemini 等协议保持原行为。
+- 不再按纯对话或 Agent 模式筛选；第三方 Responses 请求统一适配，包括工具调用后的续轮。Chat Completions、Anthropic、Gemini 等其他协议保持原行为。
 - `openai.com`、`chatgpt.com` 及其子域名不应用此中转适配。
 - 这是针对上述 sub2api 行为的客户端适配意图，不是对所有 sub2api 版本/配置的服务端行为保证。是否采用这些字段路由、是否补入 instructions、是否命中缓存，仍取决于中转版本、账号池、路由配置及上游缓存条件；请用服务端日志和实际 cached token 用量验证。
-
-## Android arm64 自用安装包
-
-已签名的 `arm64-v8a` APK 与 SHA-256 校验文件见 [Releases](https://github.com/FM-Apricity/cherry-studio-app/releases)。首个安装包为本地 release 构建：版本 `0.6.2`、`versionCode=4`，已验证签名、包名、架构、内置 JS bundle 与关闭的更新开关；尚未进行真机安装与启动测试，因此按预发布提供。
-
-仓库另保留 **Build sub2api arm64 APK** 手动 GitHub Actions 工作流，不需要 Expo 云构建账号，也不使用上游的自托管发布服务器。此前云端构建已取消，未产出安装包；本次发布不重启云端编译。
-
-- 独立名称：`Cherry Studio sub2api`；独立包名：`com.cherryai.cherrystudio_app.sub2api`，可与官方版共存，不直接覆盖官方版或共享它的应用数据。
-- 关闭官方 OTA/自动 APK 更新，避免官方更新覆盖本 fork 的修改；后续升级请安装同一专用签名构建的 APK。
-- 使用本 fork 专用签名，签名密钥仅存入仓库 Actions Secrets，并另行备份，不提交到源码或构建产物。
-- 在本仓库 **Actions → Build sub2api arm64 APK → Run workflow** 触发；成功后在该次运行的 **Artifacts** 中下载 APK 及 SHA-256 校验文件（保留 30 天）。下载的 artifact ZIP 需要先解压。
-- 本工作流仅构建与上传 artifact，不发布到官方商店，也不会向上游创建 PR 或推送代码。
-
-以下为上游项目介绍。
 
 ---
 

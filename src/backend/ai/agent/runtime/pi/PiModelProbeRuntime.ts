@@ -136,6 +136,9 @@ class PiModelProbeSession implements AgentRuntimeSession {
       async () => async (report) => {
         this.channel.push({ type: 'usage', ...report });
       },
+      undefined,
+      undefined,
+      () => ({ sessionId: request.sessionId, turnId: request.turnId }),
     );
     // Registration only fills this bridge's memory catalog; late reads cannot admit a run.
     await raceAbort(bridge.registerModel(request.model), this.controller.signal);
