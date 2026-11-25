@@ -4,27 +4,26 @@
 
 ## 本 fork 修改了什么，为什么修改
 
-本次改动针对纯对话（`minimal` 模式）发往第三方中转站的 Responses 请求：
+针对纯对话（`minimal` 模式）发往第三方中转站的 Responses 请求：
 
 - **显式发送顶层 `instructions`**：将 Cherry 原本经 SDK 序列化到 `input` 中的文本 `system/developer` 消息移到顶层 `instructions`，并移除对应输入消息，避免重复。包括后续持久化的系统更新。这样做是为了避免 sub2api 在请求缺少 `instructions` 时补入自己的默认 instructions，保持实际发送的系统提示由客户端明确控制。已有的顶层文本 instructions 会保留；遇到无法安全转换的非文本系统内容时不丢弃原内容。
 - **`session-id` 请求头 = 当前 Cherry 会话 ID**。
 - **`prompt_cache_key` 请求体字段 = 同一会话 ID**。
 - **`x-codex-turn-metadata` 请求头**使用最小 JSON：`session_id`、`thread_id`、`turn_id`、`request_kind`。前两项等于当前会话 ID，`request_kind` 为 `turn`；新一轮回复使用新的 `turn_id`，自动重试复用同一轮 ID。
 
-这些会话与轮次参数的目的是让 sub2api 能识别同一会话及重试，支持正确、一致的会话路由与 prompt cache 复用，减少因身份或提示词被改写而破坏缓存命中的机会。它们不用于伪装 Codex/Pi 的安装身份。
+这些会话与轮次参数的目的是让 sub2api 能识别同一会话及重试，支持正确、一致的会话路由与 prompt cache 复用，减少因身份或提示词被改写而破坏缓存命中的机会。
 
 **边界与限制：**
 
 - 仅作用于明确标记为纯对话的 Responses 回复；Agent 模式、Chat Completions、Anthropic、Gemini 等协议保持原行为。
 - `openai.com`、`chatgpt.com` 及其子域名不应用此中转适配。
 - 这是针对上述 sub2api 行为的客户端适配意图，不是对所有 sub2api 版本/配置的服务端行为保证。是否采用这些字段路由、是否补入 instructions、是否命中缓存，仍取决于中转版本、账号池、路由配置及上游缓存条件；请用服务端日志和实际 cached token 用量验证。
-- 缓存键并不让任意不同提示词共享缓存，也不代表客户端可以强制缓存命中。
-
-回归测试覆盖最终 SDK 序列化请求、自动重试、跨轮/跨会话、持久化恢复及适配范围隔离。
 
 ## Android arm64 自用安装包
 
-本 fork 的 **Build sub2api arm64 APK** GitHub Actions 工作流用于手动构建 `arm64-v8a` APK，不需要 Expo 云构建账号，也不使用上游的自托管发布服务器。
+已签名的 `arm64-v8a` APK 与 SHA-256 校验文件见 [Releases](https://github.com/FM-Apricity/cherry-studio-app/releases)。首个安装包为本地 release 构建：版本 `0.6.2`、`versionCode=4`，已验证签名、包名、架构、内置 JS bundle 与关闭的更新开关；尚未进行真机安装与启动测试，因此按预发布提供。
+
+仓库另保留 **Build sub2api arm64 APK** 手动 GitHub Actions 工作流，不需要 Expo 云构建账号，也不使用上游的自托管发布服务器。此前云端构建已取消，未产出安装包；本次发布不重启云端编译。
 
 - 独立名称：`Cherry Studio sub2api`；独立包名：`com.cherryai.cherrystudio_app.sub2api`，可与官方版共存，不直接覆盖官方版或共享它的应用数据。
 - 关闭官方 OTA/自动 APK 更新，避免官方更新覆盖本 fork 的修改；后续升级请安装同一专用签名构建的 APK。
